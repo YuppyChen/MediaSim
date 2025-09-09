@@ -17,7 +17,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import {GeneratedImage, GeneratedVideo, GoogleGenAI} from '@google/genai';
+import {
+  GeneratedImage,
+  GeneratedVideo,
+  GoogleGenAI,
+  Modality,
+} from '@google/genai';
 import {useEffect, useRef, useState} from 'react';
 import ReactDOM from 'react-dom/client';
 import {
@@ -56,9 +61,9 @@ import {
 const ai = new GoogleGenAI({apiKey: process.env.API_KEY});
 
 const GEMINI_MODEL_NAME = 'gemini-2.5-flash';
-const IMAGEN_MODEL_NAME = 'imagen-4.0-fast-generate-001';
+const IMAGEN_MODEL_NAME = 'imagen-4.0-generate-001';
 const GEMINI_IMAGE_MODEL_NAME = 'gemini-2.5-flash-image-preview';
-const VEO_MODEL_NAME = 'veo-3.0-fast-generate-001';
+const VEO_MODEL_NAME = 'veo-2.0-generate-001';
 
 async function describeImage(imageBlob: Blob): Promise<string> {
   const imageDataBase64 = await bloblToBase64(imageBlob);
@@ -81,31 +86,52 @@ async function describeImage(imageBlob: Blob): Promise<string> {
 
 async function generateImages(
   prompt: string,
-  imageBlob: Blob = null,
+  imageBlobs: Blob[] = [],
   numberOfImages = 1,
 ): Promise<string[]> {
   const imageObjects = [];
 
-  if (imageBlob) {
-    const imageDataBase64 = await bloblToBase64(imageBlob);
-    const mimeType =
-      imageDataBase64.match(/data:(.*);base64,/)?.[1] || 'image/jpeg';
+  if (imageBlobs.length > 0) {
+    const imageParts = await Promise.all(
+      imageBlobs.map(async (blob) => {
+        const imageDataBase64 = await bloblToBase64(blob);
+        return {
+          inlineData: {
+            data: imageDataBase64,
+            mimeType: blob.type || 'image/png',
+          },
+        };
+      }),
+    );
 
-    const imagePart = {inlineData: {mimeType, data: imageDataBase64}};
     const textPart = {text: prompt};
 
     const res = await ai.models.generateContent({
       model: GEMINI_IMAGE_MODEL_NAME,
-      contents: {parts: [imagePart, textPart]},
+      contents: {parts: [...imageParts, textPart]},
+      config: {
+        responseModalities: [Modality.IMAGE, Modality.TEXT],
+      },
     });
 
-    const imagePartRes = res.candidates?.[0]?.content?.parts?.find(
-      (p) => p.inlineData,
-    );
-    if (imagePartRes && imagePartRes.inlineData) {
-      const src = `data:${imagePartRes.inlineData.mimeType};base64,${imagePartRes.inlineData.data}`;
-      imageObjects.push(src);
-    } else {
+    const responseParts = res.candidates?.[0]?.content?.parts;
+
+    if (responseParts) {
+      for (const part of responseParts) {
+        if (part.inlineData) {
+          const src = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+          imageObjects.push(src);
+        }
+      }
+    }
+
+    if (imageObjects.length === 0) {
+      const textPartRes = responseParts?.find((p) => p.text);
+      if (textPartRes?.text) {
+        throw new Error(
+          `Image generation failed. Model response: ${textPartRes.text}`,
+        );
+      }
       throw new Error(`No image data found for prompt: ${prompt}`);
     }
   } else {
@@ -277,7 +303,6 @@ const genImageClick = async (editor: Editor) => {
   const imageShapes = shapes.filter((shape) =>
     editor.isShapeOfType(shape, 'image'),
   );
-  imageShapes.length = Math.min(1, imageShapes.length); // Max 1 image shape
 
   await Promise.all(
     imageShapes.map(async (shape) => {
@@ -301,12 +326,11 @@ const genImageClick = async (editor: Editor) => {
   editor.zoomToSelectionIfOffscreen(20);
 
   const promptText = contents.join('\n');
-  const image = images.length > 0 ? images[0] : null;
 
   console.log('generating...', contents);
   let imageObjects = [];
   try {
-    imageObjects = await generateImages(promptText, image);
+    imageObjects = await generateImages(promptText, images);
   } catch (e) {
     editor.select(placeholderIds[0]);
     editor.deleteShapes(placeholderIds);
@@ -743,7 +767,9 @@ const ContextualToolbarComponent = track(() => {
   if (hasText && hasImage) {
     actions.push({
       label: 'Generate image',
-      title: 'Generate image from image and text',
+      title: `Generate image from ${
+        imageShapes.length > 1 ? 'images' : 'image'
+      } and text`,
       icon: 'genai-generate-image',
       onClick: () => genImageClick(editor),
     });
